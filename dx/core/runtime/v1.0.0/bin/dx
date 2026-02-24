@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# dx/core/runtime/<version>/bin/dx — versioned runtime shim
+# Responsibilities:
+#   - Discover DX_ROOT (…/dx) from this script's location.
+#   - Read dx/VERSION (tolerant to BOM/whitespace).
+#   - If missing/empty, auto-detect a single version under dx/core/runtime/.
+#   - Resolve and exec: dx/core/runtime/<version>/dx.sh
+#
+# This file must be committed alongside its runtime version so each runtime
+# is self-contained and distributable.
+
+# --- Locate this script and compute DX_ROOT (…/dx) ---------------------------
+# Layout: dx/core/runtime/v1.0.0/bin/dx
+# Hops:   bin -> v1.0.0 -> runtime -> core -> dx
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+DX_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd -P)"
+
+# --- Resolve version ---------------------------------------------------------
+VERSION_FILE="$DX_ROOT/VERSION"
+RUNTIME_VERSION=""
+
+if [[ -f "$VERSION_FILE" ]]; then
+  # Read, strip UTF-8 BOM from first line and remove all whitespace (CR/LF/TAB/SP)
+  RAW_VERSION="$(cat "$VERSION_FILE" 2>/dev/null || true)"
+  RUNTIME_VERSION="$(printf '%s' "$RAW_VERSION" | LC_ALL=C sed -e '1s/^\xEF\xBB\xBF//' -e 's/[[:space:]]//g')"
+fi
+
+# --- Fallback: auto-detect a single version in dx/core/runtime/ --------------
+if [[ -z "${RUNTIME_VERSION:-}" ]]; then
+  RUNTIME_BASE="$DX_ROOT/core/runtime"
+  if [[ -d "$RUNTIME_BASE" ]]; then
+    # gather immediate subdirs as candidate versions (v1.0.0, v2.0.0, etc.)
+    mapfile -t _dx_subdirs < <(find "$RUNTIME_BASE" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | LC_ALL=C sort)
+    if [[ ${#_dx_subdirs[@]} -eq 1 ]]; then
+      RUNTIME_VERSION="${_dx_subdirs[0]}"
+    else
+      echo "Error: runtime version not set and auto-detection failed." >&2
+      echo "  Looked in: $RUNTIME_BASE" >&2
+      if [[ ${#_dx_subdirs[@]} -gt 0 ]]; then
+        echo "  Found versions:" >&2
+        for v in "${_dx_subdirs[@]}"; do echo "    - $v" >&2; done
+      else
+        echo "  No runtime versions found under $RUNTIME_BASE" >&2
+      fi
+      echo "Fixes:" >&2
+      echo "  1) Create dx/VERSION with a version like: v1.0.0" >&2
+      echo "  2) Or ensure exactly one subdir exists under dx/core/runtime/" >&2
+      exit 2
+    fi
+  else
+    echo "Error: runtime base directory missing: $RUNTIME_BASE" >&2
+    echo "Fix: create dx/core/runtime/<version>/ and dx/VERSION" >&2
+    exit 2
+  fi
+fi
+
+# --- Resolve final runtime entry and exec ------------------------------------
+RUNTIME_DIR="$DX_ROOT/core/runtime/$RUNTIME_VERSION"
+ENTRY="$RUNTIME_DIR/dx.sh"
+
+if [[ ! -x "$ENTRY" ]]; then
+  if [[ -f "$ENTRY" ]]; then
+    echo "Error: runtime entry not executable: $ENTRY" >&2
+    echo "Hint: chmod +x \"$ENTRY\"" >&2
+  else
+    echo "Error: runtime entry not found: $ENTRY" >&2
+    echo "Fixes:" >&2
+    echo "  - Ensure \"$RUNTIME_DIR/dx.sh\" exists" >&2
+    echo "  - Version in dx/VERSION: '$RUNTIME_VERSION'" >&2
+  fi
+  exit 2
+fi
+
+exec "$ENTRY" "$@"
